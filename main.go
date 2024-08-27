@@ -37,15 +37,16 @@ func (i item) FilterValue() string { return i.title }
 
 // Model structure for Bubble Tea
 type model struct {
-	list      list.Model
-	queues    []string
-	selected  map[int]struct{}
-	quitting  bool
-	messages  map[string][]string
-	conn      *amqp091.Connection
-	channel   *amqp091.Channel
-	config    *Config
-	queueList []string
+	list       list.Model
+	queues     []string
+	selected   map[int]struct{}
+	quitting   bool
+	messages   map[string][]string
+	conn       *amqp091.Connection
+	channel    *amqp091.Channel
+	config     *Config
+	queueList  []string
+	monitoring bool
 }
 
 // Function to load configuration from JSON file
@@ -131,11 +132,12 @@ func initialModel(config *Config, queues []string) model {
 	l.Title = "Select queues to monitor (Press Space to select/unselect, Enter to confirm selection):"
 
 	return model{
-		list:      l,
-		messages:  make(map[string][]string),
-		config:    config,
-		queueList: queues,
-		selected:  make(map[int]struct{}),
+		list:       l,
+		messages:   make(map[string][]string),
+		config:     config,
+		queueList:  queues,
+		selected:   make(map[int]struct{}),
+		monitoring: false,
 	}
 }
 
@@ -148,18 +150,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		case "enter":
-			// Confirm selection
-			for i := range m.selected {
-				item, ok := m.list.Items()[i].(item)
-				if ok {
-					m.queues = append(m.queues, item.FilterValue())
+			if !m.monitoring {
+				// Confirm selection and start monitoring
+				for i := range m.selected {
+					item, ok := m.list.Items()[i].(item)
+					if ok {
+						m.queues = append(m.queues, item.FilterValue())
+					}
 				}
+				log.Printf("Selected queues: %s", strings.Join(m.queues, ", "))
+				if err := m.startMonitoring(); err != nil {
+					log.Fatalf("Failed to start monitoring: %v", err)
+				}
+				m.monitoring = true
 			}
-			log.Printf("Selected queues: %s", strings.Join(m.queues, ", "))
-			if err := m.startMonitoring(); err != nil {
-				log.Fatalf("Failed to start monitoring: %v", err)
-			}
-			return m, tea.Quit
 		case " ":
 			// Toggle selection
 			index := m.list.Index()
@@ -171,7 +175,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tickMsg:
-		return m, tea.Tick(time.Second, tick)
+		if m.monitoring {
+			return m, tea.Tick(time.Second, tick)
+		}
 	}
 
 	var cmd tea.Cmd
@@ -192,7 +198,24 @@ func (m model) View() string {
 	if m.quitting {
 		return "Exiting...\n"
 	}
-	return m.list.View()
+
+	s := "RabbitMQ Messages:\n\n"
+
+	for queue, msgs := range m.messages {
+		s += fmt.Sprintf("Queue: %s\n", queue)
+		for _, msg := range msgs {
+			s += msg + "\n"
+		}
+		s += "\n"
+	}
+
+	if m.monitoring {
+		s += "\nPress 'q' to quit.\n"
+	} else {
+		s = m.list.View()
+	}
+
+	return s
 }
 
 // Bubble Tea init function
