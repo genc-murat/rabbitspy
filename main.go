@@ -125,8 +125,8 @@ func initialModel(config *Config, queues []string) model {
 		items[i] = item{title: queue}
 	}
 
-	const defaultWidth = 20
-	const defaultHeight = 14 // Set an appropriate height for the list
+	const defaultWidth = 100
+	const defaultHeight = 30
 
 	l := list.New(items, list.NewDefaultDelegate(), defaultWidth, defaultHeight)
 	l.Title = "Select queues to monitor (Press Space to select/unselect, Enter to confirm selection):"
@@ -199,23 +199,22 @@ func (m model) View() string {
 		return "Exiting...\n"
 	}
 
-	s := "RabbitMQ Messages:\n\n"
-
-	for queue, msgs := range m.messages {
-		s += fmt.Sprintf("Queue: %s\n", queue)
-		for _, msg := range msgs {
-			s += msg + "\n"
-		}
-		s += "\n"
-	}
-
 	if m.monitoring {
+		// Show messages received from queues
+		s := "RabbitMQ Messages:\n\n"
+		for queue, msgs := range m.messages {
+			s += fmt.Sprintf("Queue: %s\n", queue)
+			for _, msg := range msgs {
+				s += msg + "\n"
+			}
+			s += "\n"
+		}
 		s += "\nPress 'q' to quit.\n"
-	} else {
-		s = m.list.View()
+		return s
 	}
 
-	return s
+	// Show list for selecting queues
+	return m.list.View()
 }
 
 // Bubble Tea init function
@@ -256,13 +255,13 @@ func (m *model) startMonitoring() error {
 	return nil
 }
 
-// Consume messages from a specified queue
+// Consume messages from a specified queue with manual acknowledgment
 func (m *model) consumeQueue(queueName string) {
 	for {
 		msgs, err := m.channel.Consume(
 			queueName, // Queue name
 			"",        // Consumer tag
-			true,      // Auto ACK
+			false,     // Auto ACK (set to false for manual ACK)
 			false,     // Exclusive
 			false,     // NoLocal
 			false,     // NoWait
@@ -281,9 +280,14 @@ func (m *model) consumeQueue(queueName string) {
 		for d := range msgs {
 			msg := fmt.Sprintf("[%s] Received message: %s", queueName, d.Body)
 			m.messages[queueName] = append(m.messages[queueName], msg)
+
+			// Manually acknowledge the message
+			if err := d.Ack(false); err != nil {
+				log.Printf("Failed to acknowledge message from %s: %v", queueName, err)
+			}
 		}
 
-		time.Sleep(5 * time.Second) // Wait before retrying
+		time.Sleep(2 * time.Second) // Wait before retrying
 	}
 }
 
