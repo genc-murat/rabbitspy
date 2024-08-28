@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"text/tabwriter"
 	"time"
 
+	"github.com/fatih/color"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -25,14 +25,13 @@ type Config struct {
 }
 
 type QueueInfo struct {
-	Name          string   `json:"name"`
-	VHost         string   `json:"vhost"`
-	Type          string   `json:"type"`
-	State         string   `json:"state"`
-	Features      []string `json:"features"`
-	Messages      int      `json:"messages"`
-	MessagesReady int      `json:"messages_ready"`
-	MessagesUnack int      `json:"messages_unacknowledged"`
+	Name          string `json:"name"`
+	VHost         string `json:"vhost"`
+	Type          string `json:"type"`
+	State         string `json:"state"`
+	Messages      int    `json:"messages"`
+	MessagesReady int    `json:"messages_ready"`
+	MessagesUnack int    `json:"messages_unacknowledged"`
 	MessageStats  struct {
 		Publish        int     `json:"publish"`
 		DeliverGet     int     `json:"deliver_get"`
@@ -87,6 +86,24 @@ func getQueues(config Config) ([]QueueInfo, error) {
 	return queues, nil
 }
 
+func printColoredNumber(n int) string {
+	switch {
+	case n == 0:
+		return color.GreenString("%5d", n)
+	case n < 100:
+		return color.YellowString("%5d", n)
+	default:
+		return color.RedString("%5d", n)
+	}
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s + strings.Repeat(" ", max-len(s))
+	}
+	return s[:max-3] + "..." + strings.Repeat(" ", max-len(s[:max-3]+"..."))
+}
+
 func main() {
 	config, err := loadConfig("config.json")
 	failOnError(err, "Failed to load configuration file")
@@ -100,8 +117,6 @@ func main() {
 	failOnError(err, "Failed to open a channel")
 	defer ch.Close()
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-
 	for {
 		queues, err := getQueues(config)
 		if err != nil {
@@ -110,24 +125,23 @@ func main() {
 			continue
 		}
 
-		fmt.Fprintln(w, "Hostname\tType\tFeatures\tState\tReady\tUnacked\tTotal\tIncoming\tDeliver/Get\tAck")
-		fmt.Fprintln(w, "--------\t----\t--------\t-----\t-----\t-------\t-----\t--------\t------------\t---")
+		fmt.Println("\nHostname                 Type     State   Ready Unacked Total  Incoming Deliver/Get     Ack")
+		fmt.Println(strings.Repeat("-", 110))
 
 		for _, queue := range queues {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%.2f\t%.2f\t%.2f\n",
-				queue.VHost+"/"+queue.Name,
-				queue.Type,
-				strings.Join(queue.Features, ","),
-				queue.State,
-				queue.MessagesReady,
-				queue.MessagesUnack,
-				queue.Messages,
+			fmt.Printf("%-25s %-8s %-7s %s %s %s %8.2f %11.2f %11.2f\n",
+				truncate(queue.VHost+"/"+queue.Name, 25),
+				truncate(queue.Type, 8),
+				truncate(queue.State, 7),
+				printColoredNumber(queue.MessagesReady),
+				printColoredNumber(queue.MessagesUnack),
+				printColoredNumber(queue.Messages),
 				float64(queue.MessageStats.Publish),
 				queue.MessageStats.DeliverGetRate,
 				queue.MessageStats.AckRate)
+			fmt.Println(strings.Repeat("-", 110))
 		}
 
-		w.Flush()
 		fmt.Println("\nRefreshing in 5 seconds...")
 		time.Sleep(5 * time.Second)
 	}
