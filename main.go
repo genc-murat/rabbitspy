@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -12,7 +13,6 @@ import (
 
 	"github.com/faiface/beep"
 	"github.com/faiface/beep/speaker"
-	"github.com/faiface/beep/wav"
 	"github.com/gizak/termui/v3"
 	"github.com/gizak/termui/v3/widgets"
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -46,7 +46,6 @@ type QueueInfo struct {
 var (
 	lastAlertTime time.Time
 	alertCooldown = 1 * time.Minute
-	alertSound    *beep.Buffer
 )
 
 func failOnError(err error, msg string) {
@@ -132,11 +131,39 @@ func isErrorQueue(queueName string) bool {
 	return strings.HasPrefix(strings.ToLower(queueName), "error") || strings.HasSuffix(strings.ToLower(queueName), "error")
 }
 
+// Beep sesi üreteci
+type beepStreamer struct {
+	freq float64
+	t    float64
+}
+
+func (bs *beepStreamer) Stream(samples [][2]float64) (n int, ok bool) {
+	for i := range samples {
+		v := math.Sin(2 * math.Pi * bs.freq * bs.t)
+		samples[i][0] = v
+		samples[i][1] = v
+		bs.t += 1.0 / 44100
+	}
+	return len(samples), true
+}
+
+func (bs *beepStreamer) Err() error {
+	return nil
+}
+
 func playAlertSound() {
 	if time.Since(lastAlertTime) < alertCooldown {
 		return
 	}
-	speaker.Play(alertSound.Streamer(0, alertSound.Len()))
+	sr := beep.SampleRate(44100)
+	speaker.Init(sr, sr.N(time.Second/10))
+
+	beeper := &beepStreamer{freq: 440} // 440 Hz (A4 nota)
+	done := make(chan bool)
+	speaker.Play(beep.Seq(beep.Take(sr.N(time.Second), beeper), beep.Callback(func() {
+		done <- true
+	})))
+	<-done
 	lastAlertTime = time.Now()
 }
 
@@ -148,22 +175,6 @@ func main() {
 	conn, err := amqp.Dial(amqpURI)
 	failOnError(err, "Failed to connect to RabbitMQ")
 	defer conn.Close()
-
-	// Initialize audio
-	f, err := os.Open("alert.wav")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	streamer, format, err := wav.Decode(f)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer streamer.Close()
-
-	alertSound = beep.NewBuffer(format)
-	alertSound.Append(streamer)
-	speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10))
 
 	if err := termui.Init(); err != nil {
 		log.Fatalf("failed to initialize termui: %v", err)
@@ -234,7 +245,7 @@ func main() {
 		if errorQueuesFound {
 			alertWidget.Text = "ALERT: Error queue(s) detected!"
 			alertWidget.TextStyle = termui.NewStyle(termui.ColorRed, termui.ColorClear, termui.ModifierBold)
-			playAlertSound()
+			go playAlertSound()
 		} else {
 			alertWidget.Text = "No error queues detected."
 			alertWidget.TextStyle = termui.NewStyle(termui.ColorGreen)
