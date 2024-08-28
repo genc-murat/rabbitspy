@@ -1,10 +1,9 @@
 {
-    "rabbitmq": {
-      "username": "administrator",
-      "password": "afb2023afb2023!",
-      "host": "192.168.4.36",
-      "port": "29272",
-      "management_port": "15672"
-    }
+  "rabbitmq": {
+    "username": "guest",
+    "password": "guest",
+    "host": "localhost",
+    "port": "5672",
+    "management_port": "15672"
   }
-  
+}
