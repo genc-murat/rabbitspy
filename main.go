@@ -10,6 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/faiface/beep"
+	"github.com/faiface/beep/speaker"
+	"github.com/faiface/beep/wav"
 	"github.com/gizak/termui/v3"
 	"github.com/gizak/termui/v3/widgets"
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -39,6 +42,12 @@ type QueueInfo struct {
 		Ack        int `json:"ack"`
 	} `json:"message_stats"`
 }
+
+var (
+	lastAlertTime time.Time
+	alertCooldown = 1 * time.Minute
+	alertSound    *beep.Buffer
+)
 
 func failOnError(err error, msg string) {
 	if err != nil {
@@ -119,6 +128,18 @@ func getStateIndicator(state string) string {
 	return "✗"
 }
 
+func isErrorQueue(queueName string) bool {
+	return strings.HasPrefix(strings.ToLower(queueName), "error") || strings.HasSuffix(strings.ToLower(queueName), "error")
+}
+
+func playAlertSound() {
+	if time.Since(lastAlertTime) < alertCooldown {
+		return
+	}
+	speaker.Play(alertSound.Streamer(0, alertSound.Len()))
+	lastAlertTime = time.Now()
+}
+
 func main() {
 	config, err := loadConfig("config.json")
 	failOnError(err, "Failed to load configuration file")
@@ -127,6 +148,22 @@ func main() {
 	conn, err := amqp.Dial(amqpURI)
 	failOnError(err, "Failed to connect to RabbitMQ")
 	defer conn.Close()
+
+	// Initialize audio
+	f, err := os.Open("alert.wav")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	streamer, format, err := wav.Decode(f)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer streamer.Close()
+
+	alertSound = beep.NewBuffer(format)
+	alertSound.Append(streamer)
+	speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10))
 
 	if err := termui.Init(); err != nil {
 		log.Fatalf("failed to initialize termui: %v", err)
@@ -144,6 +181,10 @@ func main() {
 	updateTime.Text = "Last updated: N/A"
 	updateTime.BorderStyle = termui.NewStyle(termui.ColorYellow)
 
+	alertWidget := widgets.NewParagraph()
+	alertWidget.Text = ""
+	alertWidget.BorderStyle = termui.NewStyle(termui.ColorRed)
+
 	updateTable := func() {
 		queues, err := getQueues(config)
 		if err != nil {
@@ -153,9 +194,8 @@ func main() {
 
 		width, height := termui.TerminalDimensions()
 
-		// Dynamic column widths
 		queueNameWidth := width / 3
-		otherColumnsWidth := (width - queueNameWidth - 4) / 7 // 4 is for Type and State columns (2 each)
+		otherColumnsWidth := (width - queueNameWidth - 4) / 7
 		table.ColumnWidths = []int{queueNameWidth, 2, 2}
 		for i := 0; i < 6; i++ {
 			table.ColumnWidths = append(table.ColumnWidths, otherColumnsWidth)
@@ -165,7 +205,11 @@ func main() {
 			{"Queue Name", "T", "S", "Ready", "Unacked", "Total", "In", "D/G", "Ack"},
 		}
 
+		errorQueuesFound := false
 		for _, queue := range queues {
+			if isErrorQueue(queue.Name) {
+				errorQueuesFound = true
+			}
 			rows = append(rows, []string{
 				truncateString(queue.VHost+"/"+queue.Name, queueNameWidth),
 				safeGetFirstChar(queue.Type),
@@ -181,17 +225,26 @@ func main() {
 
 		table.Rows = rows
 
-		// Apply header style
 		for i := range table.Rows[0] {
 			table.Rows[0][i] = fmt.Sprintf("[%s](fg:black,bg:yellow)", truncateString(table.Rows[0][i], table.ColumnWidths[i]))
 		}
 
 		updateTime.Text = fmt.Sprintf("Last updated: %s", time.Now().Format("2006-01-02 15:04:05"))
 
+		if errorQueuesFound {
+			alertWidget.Text = "ALERT: Error queue(s) detected!"
+			alertWidget.TextStyle = termui.NewStyle(termui.ColorRed, termui.ColorClear, termui.ModifierBold)
+			playAlertSound()
+		} else {
+			alertWidget.Text = "No error queues detected."
+			alertWidget.TextStyle = termui.NewStyle(termui.ColorGreen)
+		}
+
 		termui.Clear()
-		table.SetRect(0, 0, width, height-3)
-		updateTime.SetRect(0, height-3, width, height)
-		termui.Render(table, updateTime)
+		table.SetRect(0, 0, width, height-6)
+		updateTime.SetRect(0, height-6, width, height-3)
+		alertWidget.SetRect(0, height-3, width, height)
+		termui.Render(table, updateTime, alertWidget)
 	}
 
 	updateTable()
