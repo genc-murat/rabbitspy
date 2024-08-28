@@ -10,7 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fatih/color"
+	"github.com/gizak/termui/v3"
+	"github.com/gizak/termui/v3/widgets"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -33,11 +34,9 @@ type QueueInfo struct {
 	MessagesReady int    `json:"messages_ready"`
 	MessagesUnack int    `json:"messages_unacknowledged"`
 	MessageStats  struct {
-		Publish        int     `json:"publish"`
-		DeliverGet     int     `json:"deliver_get"`
-		DeliverGetRate float64 `json:"deliver_get_details.rate"`
-		Ack            int     `json:"ack"`
-		AckRate        float64 `json:"ack_details.rate"`
+		Publish    int `json:"publish"`
+		DeliverGet int `json:"deliver_get"`
+		Ack        int `json:"ack"`
 	} `json:"message_stats"`
 }
 
@@ -86,22 +85,38 @@ func getQueues(config Config) ([]QueueInfo, error) {
 	return queues, nil
 }
 
-func printColoredNumber(n int) string {
-	switch {
-	case n == 0:
-		return color.GreenString("%5d", n)
-	case n < 100:
-		return color.YellowString("%5d", n)
-	default:
-		return color.RedString("%5d", n)
+func colorizeNumber(n int) string {
+	if n == 0 {
+		return fmt.Sprintf("[%d](fg:green)", n)
+	} else if n < 100 {
+		return fmt.Sprintf("[%d](fg:yellow)", n)
+	} else {
+		return fmt.Sprintf("[%d](fg:red)", n)
 	}
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s + strings.Repeat(" ", max-len(s))
+func truncateString(s string, maxLength int) string {
+	if s == "" {
+		return strings.Repeat(" ", maxLength)
 	}
-	return s[:max-3] + "..." + strings.Repeat(" ", max-len(s[:max-3]+"..."))
+	if len(s) <= maxLength {
+		return s + strings.Repeat(" ", maxLength-len(s))
+	}
+	return s[:maxLength-3] + "..."
+}
+
+func safeGetFirstChar(s string) string {
+	if len(s) > 0 {
+		return string(s[0])
+	}
+	return "-"
+}
+
+func getStateIndicator(state string) string {
+	if strings.ToLower(state) == "running" {
+		return "✓"
+	}
+	return "✗"
 }
 
 func main() {
@@ -113,36 +128,89 @@ func main() {
 	failOnError(err, "Failed to connect to RabbitMQ")
 	defer conn.Close()
 
-	ch, err := conn.Channel()
-	failOnError(err, "Failed to open a channel")
-	defer ch.Close()
+	if err := termui.Init(); err != nil {
+		log.Fatalf("failed to initialize termui: %v", err)
+	}
+	defer termui.Close()
 
-	for {
+	table := widgets.NewTable()
+	table.TextStyle = termui.NewStyle(termui.ColorWhite)
+	table.TextAlignment = termui.AlignLeft
+	table.BorderStyle = termui.NewStyle(termui.ColorGreen)
+	table.RowSeparator = true
+	table.FillRow = true
+
+	updateTime := widgets.NewParagraph()
+	updateTime.Text = "Last updated: N/A"
+	updateTime.BorderStyle = termui.NewStyle(termui.ColorYellow)
+
+	updateTable := func() {
 		queues, err := getQueues(config)
 		if err != nil {
 			log.Printf("Error listing queues: %s", err)
-			time.Sleep(5 * time.Second)
-			continue
+			return
 		}
 
-		fmt.Println("\nHostname                 Type     State   Ready Unacked Total  Incoming Deliver/Get     Ack")
-		fmt.Println(strings.Repeat("-", 110))
+		width, height := termui.TerminalDimensions()
+
+		// Dynamic column widths
+		queueNameWidth := width / 3
+		otherColumnsWidth := (width - queueNameWidth - 4) / 7 // 4 is for Type and State columns (2 each)
+		table.ColumnWidths = []int{queueNameWidth, 2, 2}
+		for i := 0; i < 6; i++ {
+			table.ColumnWidths = append(table.ColumnWidths, otherColumnsWidth)
+		}
+
+		rows := [][]string{
+			{"Queue Name", "T", "S", "Ready", "Unacked", "Total", "In", "D/G", "Ack"},
+		}
 
 		for _, queue := range queues {
-			fmt.Printf("%-25s %-8s %-7s %s %s %s %8.2f %11.2f %11.2f\n",
-				truncate(queue.VHost+"/"+queue.Name, 25),
-				truncate(queue.Type, 8),
-				truncate(queue.State, 7),
-				printColoredNumber(queue.MessagesReady),
-				printColoredNumber(queue.MessagesUnack),
-				printColoredNumber(queue.Messages),
-				float64(queue.MessageStats.Publish),
-				queue.MessageStats.DeliverGetRate,
-				queue.MessageStats.AckRate)
-			fmt.Println(strings.Repeat("-", 110))
+			rows = append(rows, []string{
+				truncateString(queue.VHost+"/"+queue.Name, queueNameWidth),
+				safeGetFirstChar(queue.Type),
+				getStateIndicator(queue.State),
+				colorizeNumber(queue.MessagesReady),
+				colorizeNumber(queue.MessagesUnack),
+				colorizeNumber(queue.Messages),
+				fmt.Sprintf("%d", queue.MessageStats.Publish),
+				fmt.Sprintf("%d", queue.MessageStats.DeliverGet),
+				fmt.Sprintf("%d", queue.MessageStats.Ack),
+			})
 		}
 
-		fmt.Println("\nRefreshing in 5 seconds...")
-		time.Sleep(5 * time.Second)
+		table.Rows = rows
+
+		// Apply header style
+		for i := range table.Rows[0] {
+			table.Rows[0][i] = fmt.Sprintf("[%s](fg:black,bg:yellow)", truncateString(table.Rows[0][i], table.ColumnWidths[i]))
+		}
+
+		updateTime.Text = fmt.Sprintf("Last updated: %s", time.Now().Format("2006-01-02 15:04:05"))
+
+		termui.Clear()
+		table.SetRect(0, 0, width, height-3)
+		updateTime.SetRect(0, height-3, width, height)
+		termui.Render(table, updateTime)
+	}
+
+	updateTable()
+
+	uiEvents := termui.PollEvents()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case e := <-uiEvents:
+			switch e.ID {
+			case "q", "<C-c>":
+				return
+			case "<Resize>":
+				updateTable()
+			}
+		case <-ticker.C:
+			updateTable()
+		}
 	}
 }
