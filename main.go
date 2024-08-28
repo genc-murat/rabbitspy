@@ -136,7 +136,7 @@ func main() {
 	table := widgets.NewTable()
 	table.TextStyle = termui.NewStyle(termui.ColorWhite)
 	table.TextAlignment = termui.AlignLeft
-	table.BorderStyle = termui.NewStyle(termui.ColorGreen)
+	table.BorderStyle = termui.NewStyle(termui.ColorCyan)
 	table.RowSeparator = true
 	table.FillRow = true
 
